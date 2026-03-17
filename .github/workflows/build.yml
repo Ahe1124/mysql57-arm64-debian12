@@ -1,0 +1,78 @@
+name: Build MySQL 5.7 for Debian 12 aarch64
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+
+    container:
+      image: debian:bookworm
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update -y
+          apt-get install -y \
+            build-essential cmake make \
+            libssl-dev libncurses5-dev libaio-dev \
+            libreadline-dev pkg-config \
+            wget curl git bzip2 xz-utils \
+            libtirpc-dev rpcsvc-proto \
+            gcc g++ perl
+
+      - name: Download MySQL 5.7.44 source with boost
+        run: |
+          cd /tmp
+          wget -q https://cdn.mysql.com/archives/mysql-5.7/mysql-boost-5.7.44.tar.gz
+          tar xzf mysql-boost-5.7.44.tar.gz
+
+      - name: Build MySQL
+        run: |
+          cd /tmp/mysql-5.7.44
+          mkdir build && cd build
+          cmake .. \
+            -DCMAKE_INSTALL_PREFIX=/tmp/mysql-5.7.44-aarch64 \
+            -DMYSQL_DATADIR=/www/server/data \
+            -DSYSCONFDIR=/etc \
+            -DMYSQL_UNIX_ADDR=/tmp/mysql.sock \
+            -DWITH_BOOST=/tmp/mysql-5.7.44/boost \
+            -DWITH_INNOBASE_STORAGE_ENGINE=1 \
+            -DWITH_PARTITION_STORAGE_ENGINE=1 \
+            -DWITH_FEDERATED_STORAGE_ENGINE=1 \
+            -DWITH_BLACKHOLE_STORAGE_ENGINE=1 \
+            -DWITH_MYISAM_STORAGE_ENGINE=1 \
+            -DENABLED_LOCAL_INFILE=1 \
+            -DENABLE_DTRACE=0 \
+            -DWITH_EMBEDDED_SERVER=0 \
+            -DWITH_SSL=system \
+            -DWITH_ZLIB=system \
+            -DDEFAULT_CHARSET=utf8mb4 \
+            -DDEFAULT_COLLATION=utf8mb4_general_ci \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWITH_UNIT_TESTS=0 \
+            -DWITHOUT_TOKUDB=1
+          make -j$(nproc)
+          make install
+
+      - name: Package
+        run: |
+          cd /tmp
+          tar czf mysql-5.7.44-aarch64-debian12.tar.gz mysql-5.7.44-aarch64
+          ls -lh mysql-5.7.44-aarch64-debian12.tar.gz
+
+      - name: Create Release and Upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -sL https://github.com/cli/cli/releases/download/v2.45.0/gh_2.45.0_linux_arm64.tar.gz | tar xz -C /tmp
+          /tmp/gh_2.45.0_linux_arm64/bin/gh release create v5.7.44 \
+            /tmp/mysql-5.7.44-aarch64-debian12.tar.gz \
+            --repo ${{ github.repository }} \
+            --title "MySQL 5.7.44 aarch64 Debian 12 bookworm" \
+            --notes "MySQL 5.7.44 precompiled for Debian 12 (bookworm) aarch64. Install prefix: /tmp/mysql-5.7.44-aarch64, move to /www/server/mysql after extraction." \
+            --latest
