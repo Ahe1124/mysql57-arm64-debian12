@@ -106,7 +106,7 @@ jobs:
 
       - name: Create GitHub Release
         run: |
-          # 创建 release
+          # 创建 release，用 grep+sed 解析 upload_url，不依赖 python3
           RELEASE=$(curl -sf -X POST \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Content-Type: application/json" \
@@ -118,7 +118,8 @@ jobs:
               "draft": false,
               "prerelease": false
             }')
-          UPLOAD_URL=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin)['upload_url'])" | sed 's/{.*//')
+          echo "Release response: $RELEASE"
+          UPLOAD_URL=$(echo "$RELEASE" | grep -o '"upload_url":"[^"]*"' | sed 's/"upload_url":"//;s/".*//' | sed 's/{.*//')
           echo "Upload URL: $UPLOAD_URL"
 
           # 上传包
