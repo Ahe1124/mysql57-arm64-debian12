@@ -6,6 +6,10 @@ on:
     tags:
       - 'v*'
 
+env:
+  MYSQL_VERSION: "5.7.44"
+  PACKAGE_BASENAME: "mysql-5.7.44-aarch64-debian12"
+
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
@@ -33,18 +37,19 @@ jobs:
             libldap2-dev \
             libsasl2-dev \
             libcurl4-openssl-dev \
-            patchelf
+            patchelf \
+            jq
 
       - name: Download MySQL 5.7.44 source with boost
         run: |
           cd /tmp
           wget -q --show-progress \
-            https://cdn.mysql.com/archives/mysql-5.7/mysql-boost-5.7.44.tar.gz
-          tar xzf mysql-boost-5.7.44.tar.gz
+            "https://cdn.mysql.com/archives/mysql-5.7/mysql-boost-${MYSQL_VERSION}.tar.gz"
+          tar xzf "mysql-boost-${MYSQL_VERSION}.tar.gz"
 
       - name: Apply gcc12 compatibility patches
         run: |
-          cd /tmp/mysql-5.7.44
+          cd "/tmp/mysql-${MYSQL_VERSION}"
           sed -i 's/template<>/template <>/g' include/atomic_class.h 2>/dev/null || true
           find . \( -name "*.cc" -o -name "*.c" -o -name "*.h" \) \
             -exec sed -i 's/\bregister \([a-zA-Z]\)/\1/g' {} \; 2>/dev/null || true
@@ -52,14 +57,14 @@ jobs:
 
       - name: Build MySQL
         run: |
-          cd /tmp/mysql-5.7.44
+          cd "/tmp/mysql-${MYSQL_VERSION}"
           mkdir -p build && cd build
           cmake .. \
-            -DCMAKE_INSTALL_PREFIX=/tmp/mysql-5.7.44-aarch64 \
+            -DCMAKE_INSTALL_PREFIX="/tmp/mysql-${MYSQL_VERSION}-aarch64" \
             -DMYSQL_DATADIR=/www/server/data \
             -DSYSCONFDIR=/etc \
             -DMYSQL_UNIX_ADDR=/tmp/mysql.sock \
-            -DWITH_BOOST=/tmp/mysql-5.7.44/boost \
+            -DWITH_BOOST="/tmp/mysql-${MYSQL_VERSION}/boost" \
             -DWITH_INNOBASE_STORAGE_ENGINE=1 \
             -DWITH_PARTITION_STORAGE_ENGINE=1 \
             -DWITH_FEDERATED_STORAGE_ENGINE=1 \
@@ -82,66 +87,94 @@ jobs:
 
       - name: Verify build
         run: |
-          test -f /tmp/mysql-5.7.44-aarch64/bin/mysqld || { echo "mysqld not found!"; exit 1; }
-          test -f /tmp/mysql-5.7.44-aarch64/bin/mysql  || { echo "mysql not found!"; exit 1; }
+          test -f "/tmp/mysql-${MYSQL_VERSION}-aarch64/bin/mysqld" || { echo "mysqld not found!"; exit 1; }
+          test -f "/tmp/mysql-${MYSQL_VERSION}-aarch64/bin/mysql"  || { echo "mysql not found!"; exit 1; }
           echo "Build verified OK"
-          /tmp/mysql-5.7.44-aarch64/bin/mysqld --version
+          "/tmp/mysql-${MYSQL_VERSION}-aarch64/bin/mysqld" --version
 
       - name: Strip and package
         run: |
-          find /tmp/mysql-5.7.44-aarch64/bin -type f \
+          find "/tmp/mysql-${MYSQL_VERSION}-aarch64/bin" -type f \
             -exec strip --strip-unneeded {} \; 2>/dev/null || true
-          find /tmp/mysql-5.7.44-aarch64/lib -name "*.so*" \
+          find "/tmp/mysql-${MYSQL_VERSION}-aarch64/lib" -name "*.so*" \
             -exec strip --strip-unneeded {} \; 2>/dev/null || true
           cd /tmp
-          tar czf mysql-5.7.44-aarch64-debian12.tar.gz mysql-5.7.44-aarch64
-          ls -lh mysql-5.7.44-aarch64-debian12.tar.gz
+          tar czf "${PACKAGE_BASENAME}.tar.gz" "mysql-${MYSQL_VERSION}-aarch64"
+          ls -lh "${PACKAGE_BASENAME}.tar.gz"
 
       - name: Upload artifact (backup)
         uses: actions/upload-artifact@v4
         with:
-          name: mysql-5.7.44-aarch64-debian12
-          path: /tmp/mysql-5.7.44-aarch64-debian12.tar.gz
+          name: ${{ env.PACKAGE_BASENAME }}
+          path: /tmp/${{ env.PACKAGE_BASENAME }}.tar.gz
           retention-days: 7
 
       - name: Create GitHub Release
+        shell: bash
         run: |
+          set -euo pipefail
+
           REPO="${{ github.repository }}"
           TOKEN="${{ secrets.GITHUB_TOKEN }}"
-          TAG="v5.7.44"
+          TAG="v${MYSQL_VERSION}"
+          ASSET_NAME="${PACKAGE_BASENAME}.tar.gz"
+          ASSET_PATH="/tmp/${ASSET_NAME}"
           UPLOAD_BASE="https://uploads.github.com/repos/${REPO}/releases"
+          API_BASE="https://api.github.com/repos/${REPO}"
+          AUTH_HEADER="Authorization: Bearer ${TOKEN}"
+          ACCEPT_HEADER="Accept: application/vnd.github+json"
 
-          # 查询是否已有此 tag 的 release
-          RELEASE_ID=$(curl -s \
-            -H "Authorization: token ${TOKEN}" \
-            "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" \
-            | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
+          test -f "${ASSET_PATH}" || { echo "asset not found: ${ASSET_PATH}"; exit 1; }
 
-          if [ -z "$RELEASE_ID" ]; then
+          RELEASE_JSON="$(curl -fsSL \
+            -H "${AUTH_HEADER}" \
+            -H "${ACCEPT_HEADER}" \
+            "${API_BASE}/releases/tags/${TAG}" || true)"
+
+          RELEASE_ID="$(echo "${RELEASE_JSON}" | jq -r '.id // empty')"
+
+          if [ -z "${RELEASE_ID}" ]; then
             echo "Creating new release..."
-            RELEASE_ID=$(curl -s -X POST \
-              -H "Authorization: token ${TOKEN}" \
+            RELEASE_JSON="$(curl -fsSL -X POST \
+              -H "${AUTH_HEADER}" \
+              -H "${ACCEPT_HEADER}" \
               -H "Content-Type: application/json" \
-              "https://api.github.com/repos/${REPO}/releases" \
-              -d "{\"tag_name\":\"${TAG}\",\"name\":\"MySQL 5.7.44 aarch64 Debian 12 bookworm\",\"body\":\"MySQL 5.7.44 compiled natively on Debian 12 bookworm aarch64.\",\"draft\":false,\"prerelease\":false}" \
-              | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
+              "${API_BASE}/releases" \
+              -d "{\"tag_name\":\"${TAG}\",\"name\":\"MySQL ${MYSQL_VERSION} aarch64 Debian 12 bookworm\",\"body\":\"MySQL ${MYSQL_VERSION} compiled natively on Debian 12 bookworm aarch64.\",\"draft\":false,\"prerelease\":false}")"
+            RELEASE_ID="$(echo "${RELEASE_JSON}" | jq -r '.id // empty')"
           fi
 
-          echo "Release ID: $RELEASE_ID"
-          if [ -z "$RELEASE_ID" ]; then
+          echo "Release ID: ${RELEASE_ID}"
+          if [ -z "${RELEASE_ID}" ]; then
             echo "ERROR: Could not get release ID"
             exit 1
           fi
 
-          UPLOAD_URL="${UPLOAD_BASE}/${RELEASE_ID}/assets?name=mysql-5.7.44-aarch64-debian12.tar.gz"
-          echo "Uploading to: $UPLOAD_URL"
+          # 如果已存在同名 asset，先删再传，避免 already_exists
+          ASSET_ID="$(curl -fsSL \
+            -H "${AUTH_HEADER}" \
+            -H "${ACCEPT_HEADER}" \
+            "${API_BASE}/releases/${RELEASE_ID}/assets" \
+            | jq -r ".[] | select(.name==\"${ASSET_NAME}\") | .id" || true)"
 
-          RESULT=$(curl -s -X POST \
-            -H "Authorization: token ${TOKEN}" \
+          if [ -n "${ASSET_ID:-}" ]; then
+            echo "Deleting existing asset id=${ASSET_ID}"
+            curl -fsSL -X DELETE \
+              -H "${AUTH_HEADER}" \
+              -H "${ACCEPT_HEADER}" \
+              "${API_BASE}/releases/assets/${ASSET_ID}" >/dev/null
+          fi
+
+          UPLOAD_URL="${UPLOAD_BASE}/${RELEASE_ID}/assets?name=${ASSET_NAME}"
+          echo "Uploading to: ${UPLOAD_URL}"
+
+          RESULT="$(curl -fsSL -X POST \
+            -H "${AUTH_HEADER}" \
+            -H "${ACCEPT_HEADER}" \
             -H "Content-Type: application/gzip" \
-            "$UPLOAD_URL" \
-            --data-binary @/tmp/mysql-5.7.44-aarch64-debian12.tar.gz)
-          echo "Upload result: $RESULT"
-          echo "$RESULT" | grep -q '"state":"uploaded"' \
+            "${UPLOAD_URL}" \
+            --data-binary @"${ASSET_PATH}")"
+          echo "Upload result: ${RESULT}"
+          echo "${RESULT}" | grep -q '"state":"uploaded"' \
             && echo "Release published successfully!" \
             || { echo "Upload failed"; exit 1; }
