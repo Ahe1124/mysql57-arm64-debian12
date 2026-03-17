@@ -29,14 +29,10 @@ jobs:
             gcc g++ perl \
             zlib1g-dev \
             libnuma-dev \
-            libmecab-dev \
             libedit-dev \
-            libevent-dev \
             libldap2-dev \
             libsasl2-dev \
             libcurl4-openssl-dev \
-            liblz4-dev \
-            libzstd-dev \
             patchelf
 
       - name: Download MySQL 5.7.44 source with boost
@@ -49,21 +45,9 @@ jobs:
       - name: Apply gcc12 compatibility patches
         run: |
           cd /tmp/mysql-5.7.44
-
-          # Fix: 'uint' was not declared in this scope (missing includes)
-          sed -i '1s/^/#include <cstdint>\n/' sql/item_cmpfunc.h 2>/dev/null || true
-
-          # Fix: error in 'lex_string_t' / string.h conflicts with gcc12
-          find . -name "*.cc" -o -name "*.h" | xargs grep -l "std::string" | head -5
-
-          # Fix: 'my_bool' deprecated in newer builds - patch known problematic files
-          # Fix atomic issues with gcc12
           sed -i 's/template<>/template <>/g' include/atomic_class.h 2>/dev/null || true
-
-          # Fix: 'register' keyword removed in C++17
           find . \( -name "*.cc" -o -name "*.c" -o -name "*.h" \) \
             -exec sed -i 's/\bregister \([a-zA-Z]\)/\1/g' {} \; 2>/dev/null || true
-
           echo "Patches applied"
 
       - name: Build MySQL
@@ -90,37 +74,57 @@ jobs:
             -DDEFAULT_COLLATION=utf8mb4_general_ci \
             -DCMAKE_BUILD_TYPE=Release \
             -DWITH_UNIT_TESTS=0 \
-            -DWITHOUT_TOKUDB=1 \
-            -DWITHOUT_ROCKSDB=1 \
-            -DWITHOUT_MROONGA=1 \
-            -DWITHOUT_OQGRAPH=1 \
-            -DWITHOUT_CONNECT=1 \
             -DCMAKE_C_FLAGS="-Wno-error -w" \
             -DCMAKE_CXX_FLAGS="-Wno-error -w -std=c++14" \
             -DCMAKE_EXE_LINKER_FLAGS="-lz"
-          make -j$(nproc) 2>&1 | tail -50
+          make -j$(nproc)
           make install
 
-      - name: Strip binaries and package
+      - name: Verify build
         run: |
-          cd /tmp
-          # Strip debug symbols to reduce size
-          find mysql-5.7.44-aarch64/bin -type f -exec strip --strip-unneeded {} \; 2>/dev/null || true
-          find mysql-5.7.44-aarch64/lib -name "*.so*" -exec strip --strip-unneeded {} \; 2>/dev/null || true
+          test -f /tmp/mysql-5.7.44-aarch64/bin/mysqld || { echo "mysqld not found!"; exit 1; }
+          test -f /tmp/mysql-5.7.44-aarch64/bin/mysql  || { echo "mysql not found!"; exit 1; }
+          echo "Build verified OK"
+          /tmp/mysql-5.7.44-aarch64/bin/mysqld --version
 
+      - name: Strip and package
+        run: |
+          find /tmp/mysql-5.7.44-aarch64/bin -type f \
+            -exec strip --strip-unneeded {} \; 2>/dev/null || true
+          find /tmp/mysql-5.7.44-aarch64/lib -name "*.so*" \
+            -exec strip --strip-unneeded {} \; 2>/dev/null || true
+          cd /tmp
           tar czf mysql-5.7.44-aarch64-debian12.tar.gz mysql-5.7.44-aarch64
           ls -lh mysql-5.7.44-aarch64-debian12.tar.gz
-          echo "MYSQL_DIR=$(ls -d /tmp/mysql-5.7.44-aarch64)" >> $GITHUB_ENV
 
-      - name: Create Release and Upload
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload artifact (backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql-5.7.44-aarch64-debian12
+          path: /tmp/mysql-5.7.44-aarch64-debian12.tar.gz
+          retention-days: 7
+
+      - name: Create GitHub Release
         run: |
-          curl -sL https://github.com/cli/cli/releases/download/v2.45.0/gh_2.45.0_linux_arm64.tar.gz \
-            | tar xz -C /tmp
-          /tmp/gh_2.45.0_linux_arm64/bin/gh release create v5.7.44 \
-            /tmp/mysql-5.7.44-aarch64-debian12.tar.gz \
-            --repo ${{ github.repository }} \
-            --title "MySQL 5.7.44 aarch64 Debian 12 bookworm" \
-            --notes "MySQL 5.7.44 compiled natively on Debian 12 (bookworm) aarch64. Unpack and move to /www/server/mysql." \
-            --latest
+          # 创建 release
+          RELEASE=$(curl -sf -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            https://api.github.com/repos/${{ github.repository }}/releases \
+            -d '{
+              "tag_name": "v5.7.44",
+              "name": "MySQL 5.7.44 aarch64 Debian 12 bookworm",
+              "body": "MySQL 5.7.44 compiled natively on Debian 12 (bookworm) aarch64.\n\nInstall: unpack and move to /www/server/mysql",
+              "draft": false,
+              "prerelease": false
+            }')
+          UPLOAD_URL=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin)['upload_url'])" | sed 's/{.*//')
+          echo "Upload URL: $UPLOAD_URL"
+
+          # 上传包
+          curl -sf -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/gzip" \
+            "${UPLOAD_URL}?name=mysql-5.7.44-aarch64-debian12.tar.gz" \
+            --data-binary @/tmp/mysql-5.7.44-aarch64-debian12.tar.gz
+          echo "Release published successfully"
