@@ -106,26 +106,42 @@ jobs:
 
       - name: Create GitHub Release
         run: |
-          # 创建 release，用 grep+sed 解析 upload_url，不依赖 python3
-          RELEASE=$(curl -sf -X POST \
+          # 检查 release 是否已存在
+          EXISTING=$(curl -s \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            https://api.github.com/repos/${{ github.repository }}/releases \
-            -d '{
-              "tag_name": "v5.7.44",
-              "name": "MySQL 5.7.44 aarch64 Debian 12 bookworm",
-              "body": "MySQL 5.7.44 compiled natively on Debian 12 (bookworm) aarch64.\n\nInstall: unpack and move to /www/server/mysql",
-              "draft": false,
-              "prerelease": false
-            }')
-          echo "Release response: $RELEASE"
-          UPLOAD_URL=$(echo "$RELEASE" | grep -o '"upload_url":"[^"]*"' | sed 's/"upload_url":"//;s/".*//' | sed 's/{.*//')
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/v5.7.44")
+          UPLOAD_URL=$(echo "$EXISTING" | grep -o '"upload_url":"[^"]*"' | sed 's/"upload_url":"//;s/".*//' | sed 's/{.*//')
+
+          if [ -z "$UPLOAD_URL" ]; then
+            echo "Creating new release..."
+            RELEASE=$(curl -s -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              https://api.github.com/repos/${{ github.repository }}/releases \
+              -d '{
+                "tag_name": "v5.7.44",
+                "name": "MySQL 5.7.44 aarch64 Debian 12 bookworm",
+                "body": "MySQL 5.7.44 compiled natively on Debian 12 (bookworm) aarch64.\n\nInstall: unpack and move to /www/server/mysql",
+                "draft": false,
+                "prerelease": false
+              }')
+            echo "Create response: $RELEASE"
+            UPLOAD_URL=$(echo "$RELEASE" | grep -o '"upload_url":"[^"]*"' | sed 's/"upload_url":"//;s/".*//' | sed 's/{.*//')
+          else
+            echo "Release already exists, reusing upload URL"
+          fi
+
           echo "Upload URL: $UPLOAD_URL"
+          if [ -z "$UPLOAD_URL" ]; then
+            echo "ERROR: Could not get upload URL"
+            exit 1
+          fi
 
           # 上传包
-          curl -sf -X POST \
+          RESULT=$(curl -s -X POST \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Content-Type: application/gzip" \
             "${UPLOAD_URL}?name=mysql-5.7.44-aarch64-debian12.tar.gz" \
-            --data-binary @/tmp/mysql-5.7.44-aarch64-debian12.tar.gz
-          echo "Release published successfully"
+            --data-binary @/tmp/mysql-5.7.44-aarch64-debian12.tar.gz)
+          echo "Upload response: $RESULT"
+          echo "$RESULT" | grep -q '"state":"uploaded"' && echo "Release published successfully!" || { echo "Upload may have failed"; exit 1; }
