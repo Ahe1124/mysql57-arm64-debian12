@@ -106,42 +106,42 @@ jobs:
 
       - name: Create GitHub Release
         run: |
-          # 检查 release 是否已存在
-          EXISTING=$(curl -s \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/v5.7.44")
-          UPLOAD_URL=$(echo "$EXISTING" | grep -o '"upload_url":"[^"]*"' | sed 's/"upload_url":"//;s/".*//' | sed 's/{.*//')
+          REPO="${{ github.repository }}"
+          TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          TAG="v5.7.44"
+          UPLOAD_BASE="https://uploads.github.com/repos/${REPO}/releases"
 
-          if [ -z "$UPLOAD_URL" ]; then
+          # 查询是否已有此 tag 的 release
+          RELEASE_ID=$(curl -s \
+            -H "Authorization: token ${TOKEN}" \
+            "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" \
+            | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
+
+          if [ -z "$RELEASE_ID" ]; then
             echo "Creating new release..."
-            RELEASE=$(curl -s -X POST \
-              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            RELEASE_ID=$(curl -s -X POST \
+              -H "Authorization: token ${TOKEN}" \
               -H "Content-Type: application/json" \
-              https://api.github.com/repos/${{ github.repository }}/releases \
-              -d '{
-                "tag_name": "v5.7.44",
-                "name": "MySQL 5.7.44 aarch64 Debian 12 bookworm",
-                "body": "MySQL 5.7.44 compiled natively on Debian 12 (bookworm) aarch64.\n\nInstall: unpack and move to /www/server/mysql",
-                "draft": false,
-                "prerelease": false
-              }')
-            echo "Create response: $RELEASE"
-            UPLOAD_URL=$(echo "$RELEASE" | grep -o '"upload_url":"[^"]*"' | sed 's/"upload_url":"//;s/".*//' | sed 's/{.*//')
-          else
-            echo "Release already exists, reusing upload URL"
+              "https://api.github.com/repos/${REPO}/releases" \
+              -d "{\"tag_name\":\"${TAG}\",\"name\":\"MySQL 5.7.44 aarch64 Debian 12 bookworm\",\"body\":\"MySQL 5.7.44 compiled natively on Debian 12 bookworm aarch64.\",\"draft\":false,\"prerelease\":false}" \
+              | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
           fi
 
-          echo "Upload URL: $UPLOAD_URL"
-          if [ -z "$UPLOAD_URL" ]; then
-            echo "ERROR: Could not get upload URL"
+          echo "Release ID: $RELEASE_ID"
+          if [ -z "$RELEASE_ID" ]; then
+            echo "ERROR: Could not get release ID"
             exit 1
           fi
 
-          # 上传包
+          UPLOAD_URL="${UPLOAD_BASE}/${RELEASE_ID}/assets?name=mysql-5.7.44-aarch64-debian12.tar.gz"
+          echo "Uploading to: $UPLOAD_URL"
+
           RESULT=$(curl -s -X POST \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: token ${TOKEN}" \
             -H "Content-Type: application/gzip" \
-            "${UPLOAD_URL}?name=mysql-5.7.44-aarch64-debian12.tar.gz" \
+            "$UPLOAD_URL" \
             --data-binary @/tmp/mysql-5.7.44-aarch64-debian12.tar.gz)
-          echo "Upload response: $RESULT"
-          echo "$RESULT" | grep -q '"state":"uploaded"' && echo "Release published successfully!" || { echo "Upload may have failed"; exit 1; }
+          echo "Upload result: $RESULT"
+          echo "$RESULT" | grep -q '"state":"uploaded"' \
+            && echo "Release published successfully!" \
+            || { echo "Upload failed"; exit 1; }
